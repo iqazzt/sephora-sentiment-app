@@ -1,50 +1,26 @@
 # ============================================================
+# app.py
 # BICS 2303 – Intelligent Systems | Group Project
 # Sephora Skincare Review Sentiment Analysis
-# Streamlit Web App — Organisation Dashboard
+# Streamlit Dashboard
 #
 # HOW TO RUN:
-#   1. pip install streamlit pandas scikit-learn plotly
-#      vaderSentiment nltk
+#   1. pip install streamlit pandas numpy scikit-learn
+#      matplotlib seaborn nltk vaderSentiment
 #   2. Place reviews_sample.csv in the same folder
 #   3. streamlit run app.py
+#
+# This file ONLY handles display.
+# All logic lives in pipeline.py — unchanged.
 # ============================================================
 
 import streamlit as st
 import pandas as pd
-import numpy as np
-import re
+import matplotlib.pyplot as plt
+import seaborn as sns
 import os
-import pickle
-import warnings
-warnings.filterwarnings('ignore')
 
-import nltk
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
-from nltk.stem import WordNetLemmatizer
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
-
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.naive_bayes import MultinomialNB
-from sklearn.preprocessing import LabelEncoder, MinMaxScaler
-from sklearn.cluster import KMeans, DBSCAN
-from sklearn.decomposition import TruncatedSVD
-from sklearn.metrics import silhouette_score
-
-import plotly.express as px
-import plotly.graph_objects as go
-
-# ── Download NLTK data ────────────────────────────────────
-nltk.download('punkt',     quiet=True)
-nltk.download('stopwords', quiet=True)
-nltk.download('wordnet',   quiet=True)
-nltk.download('punkt_tab', quiet=True)
-
-
-# ============================================================
-# PAGE CONFIG — must be first Streamlit command
-# ============================================================
+# ── Page config ───────────────────────────────────────────
 st.set_page_config(
     page_title="Sephora Sentiment Dashboard",
     page_icon="💄",
@@ -52,44 +28,22 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-
-# ============================================================
-# CUSTOM STYLING
-# ============================================================
+# ── Basic styling ─────────────────────────────────────────
 st.markdown("""
 <style>
-    /* Main background */
-    .main { background-color: #fafafa; }
-
-    /* Sidebar */
-    [data-testid="stSidebar"] {
-        background-color: #1a1a2e;
-    }
-    [data-testid="stSidebar"] * {
-        color: white !important;
-    }
-
-    /* Cards */
-    .card {
-        background: white;
-        border-radius: 12px;
-        padding: 1.2rem 1.5rem;
-        border: 1px solid #f0f0f0;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.06);
-        margin-bottom: 1rem;
-    }
-
-    /* Metric cards */
+    [data-testid="stSidebar"] { background-color: #1a1a2e; }
+    [data-testid="stSidebar"] * { color: white !important; }
     .metric-box {
         background: white;
         border-radius: 10px;
         padding: 1rem 1.2rem;
         text-align: center;
         border-top: 4px solid #ff0050;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+        box-shadow: 0 2px 6px rgba(0,0,0,0.06);
+        margin-bottom: 1rem;
     }
     .metric-value {
-        font-size: 28px;
+        font-size: 26px;
         font-weight: 700;
         color: #1a1a2e;
         margin: 0;
@@ -97,23 +51,8 @@ st.markdown("""
     .metric-label {
         font-size: 13px;
         color: #888;
-        margin: 0;
+        margin: 4px 0 0;
     }
-
-    /* Page title */
-    .page-title {
-        font-size: 26px;
-        font-weight: 700;
-        color: #1a1a2e;
-        margin-bottom: 0.3rem;
-    }
-    .page-subtitle {
-        font-size: 14px;
-        color: #888;
-        margin-bottom: 1.5rem;
-    }
-
-    /* Section headers */
     .section-title {
         font-size: 16px;
         font-weight: 600;
@@ -122,183 +61,57 @@ st.markdown("""
         border-bottom: 2px solid #ff0050;
         margin-bottom: 1rem;
     }
-
-    /* Sentiment badges */
-    .badge-pos { background:#e8f5e9; color:#2e7d32; padding:3px 10px; border-radius:20px; font-size:12px; font-weight:600; }
-    .badge-neg { background:#fce4ec; color:#c62828; padding:3px 10px; border-radius:20px; font-size:12px; font-weight:600; }
-    .badge-neu { background:#e3f2fd; color:#1565c0; padding:3px 10px; border-radius:20px; font-size:12px; font-weight:600; }
-
-    /* Hide Streamlit default footer */
     footer { visibility: hidden; }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ============================================================
-# HELPER FUNCTIONS
+# LOAD PIPELINE — cached so it runs only once per session
 # ============================================================
 
-def preprocess_text(text):
+@st.cache_resource(show_spinner="Running pipeline... this may take a few minutes ⏳")
+def load_pipeline():
     """
-    Clean and preprocess a review text.
-    Steps: lowercase → remove URLs → remove punctuation
-           → tokenise → remove stopwords → lemmatise
+    Calls run_pipeline() from pipeline.py.
+    Cached — runs only once, results reused across all pages.
     """
-    stop_words = set(stopwords.words('english'))
-    lemmatizer = WordNetLemmatizer()
-
-    text   = str(text).lower()
-    text   = re.sub(r"http\S+|www\S+", "", text)
-    text   = re.sub(r"[^a-zA-Z\s]", "", text)
-    tokens = word_tokenize(text)
-    tokens = [
-        lemmatizer.lemmatize(w)
-        for w in tokens
-        if w not in stop_words and len(w) > 2
-    ]
-    return " ".join(tokens)
+    from pipeline import run_pipeline
+    return run_pipeline(csv_path="reviews_sample.csv")
 
 
-def get_vader_label(text):
-    """
-    Use VADER to label a review as Positive, Negative, or Neutral
-    based on the compound score of the text.
-    """
-    analyzer = SentimentIntensityAnalyzer()
-    score    = analyzer.polarity_scores(str(text))["compound"]
-    if score >= 0.05:
-        return "Positive"
-    elif score <= -0.05:
-        return "Negative"
-    else:
-        return "Neutral"
+# Check CSV exists before running
+if not os.path.exists("reviews_sample.csv"):
+    st.error("❌ reviews_sample.csv not found. Please place it in the same folder as app.py")
+    st.stop()
 
+# Load everything from pipeline
+results = load_pipeline()
 
-def get_compound_score(text):
-    """Return VADER compound score for a review."""
-    analyzer = SentimentIntensityAnalyzer()
-    return round(analyzer.polarity_scores(str(text))["compound"], 4)
-
-
-def sentiment_emoji(label):
-    """Return emoji for a given sentiment label."""
-    return {"Positive": "😊", "Negative": "😞", "Neutral": "😐"}.get(label, "❓")
-
-
-def sentiment_color(label):
-    """Return hex color for a given sentiment label."""
-    return {"Positive": "#4CAF50", "Negative": "#f44336", "Neutral": "#2196F3"}.get(label, "#888")
-
-
-# ============================================================
-# DATA LOADING AND MODEL TRAINING (cached — runs only once)
-# ============================================================
-
-@st.cache_resource(show_spinner="Loading and training models... please wait ⏳")
-def load_data_and_train():
-    """
-    Load the dataset, preprocess text, train all models,
-    and return everything needed for the dashboard.
-    This is cached so it only runs once per session.
-    """
-
-    # ── Step 1: Load CSV ──────────────────────────────────
-    df = pd.read_csv("reviews_sample.csv")
-
-
-    # Keep only columns we need
-    keep = [c for c in ["review_text", "brand_name", "product_name"] if c in df.columns]
-    df   = df[keep].copy()
-    df.dropna(subset=["review_text"], inplace=True)
-    df   = df[df["review_text"].str.strip() != ""]
-    df.reset_index(drop=True, inplace=True)
-
-    # ── Step 2: NLP Preprocessing ─────────────────────────
-    df["clean_review"]   = df["review_text"].apply(preprocess_text)
-    df["sentiment"]      = df["review_text"].apply(get_vader_label)
-    df["compound_score"] = df["review_text"].apply(get_compound_score)
-
-    df = df[df["clean_review"].str.strip() != ""]
-    df.reset_index(drop=True, inplace=True)
-
-    # ── Step 3: TF-IDF Vectorisation ─────────────────────
-    tfidf   = TfidfVectorizer(
-        max_features=5000,
-        ngram_range=(1, 2),
-        min_df=2,
-        sublinear_tf=True
-    )
-    X_tfidf = tfidf.fit_transform(df["clean_review"])
-
-    # ── Step 4: Train Naive Bayes ─────────────────────────
-    le = LabelEncoder()
-    y  = le.fit_transform(df["sentiment"])
-    nb = MultinomialNB(alpha=1.0)
-    nb.fit(X_tfidf, y)
-
-    # Add NB predictions and confidence to dataframe
-    probas           = nb.predict_proba(X_tfidf)
-    df["nb_label"]   = le.inverse_transform(nb.predict(X_tfidf))
-    df["confidence"] = [round(float(p.max()) * 100, 1) for p in probas]
-
-    # ── Step 5: Dimensionality Reduction for Clustering ───
-    svd       = TruncatedSVD(n_components=50, random_state=42)
-    X_reduced = svd.fit_transform(X_tfidf)
-    compound  = df["compound_score"].values.reshape(-1, 1)
-    X_cluster = np.hstack([X_reduced, compound])
-    scaler    = MinMaxScaler()
-    X_cluster = scaler.fit_transform(X_cluster)
-
-    # ── Step 6: K-Means Clustering ────────────────────────
-    best_k, best_km_score = 3, -1
-    for k in range(2, 7):
-        km     = KMeans(n_clusters=k, random_state=42, n_init=10)
-        labels = km.fit_predict(X_cluster)
-        score  = silhouette_score(X_cluster, labels, sample_size=2000)
-        if score > best_km_score:
-            best_km_score = score
-            best_k        = k
-
-    kmeans           = KMeans(n_clusters=best_k, random_state=42, n_init=10)
-    df["km_cluster"] = kmeans.fit_predict(X_cluster)
-    km_sil           = silhouette_score(X_cluster, df["km_cluster"], sample_size=2000)
-    km_inertia       = kmeans.inertia_
-
-    # ── Step 7: DBSCAN Clustering ─────────────────────────
-    best_eps, best_db_sil, best_db_labels = 0.5, -1, None
-    for eps in [0.3, 0.5, 0.7, 1.0]:
-        db     = DBSCAN(eps=eps, min_samples=5)
-        labels = db.fit_predict(X_cluster)
-        n_cl   = len(set(labels)) - (1 if -1 in labels else 0)
-        if n_cl >= 2:
-            score = silhouette_score(X_cluster, labels, sample_size=2000)
-            if score > best_db_sil:
-                best_db_sil   = score
-                best_eps      = eps
-                best_db_labels = labels
-
-    df["db_cluster"] = best_db_labels if best_db_labels is not None else np.zeros(len(df), dtype=int)
-    db_n_clusters    = len(set(df["db_cluster"])) - (1 if -1 in df["db_cluster"].values else 0)
-    db_noise         = int((df["db_cluster"] == -1).sum())
-
-    # ── Step 8: Save model for Real-Time Prediction ───────
-    with open("model.pkl", "wb") as f:
-        pickle.dump({"nb": nb, "tfidf": tfidf, "le": le}, f)
-
-    return {
-        "df"          : df,
-        "nb"          : nb,
-        "tfidf"       : tfidf,
-        "le"          : le,
-        "best_k"      : best_k,
-        "km_sil"      : round(km_sil, 4),
-        "km_inertia"  : round(km_inertia, 2),
-        "best_eps"    : best_eps,
-        "best_db_sil" : round(best_db_sil, 4),
-        "db_n_clusters": db_n_clusters,
-        "db_noise"    : db_noise,
-        "X_cluster"   : X_cluster,
-    }
+# Unpack all objects from pipeline
+df                    = results["df"]
+accuracy              = results["accuracy"]
+clf_report_text       = results["clf_report_text"]
+clf_report            = results["clf_report"]
+cm                    = results["cm"]
+y_test                = results["y_test"]
+y_pred                = results["y_pred"]
+predict_new_review    = results["predict_new_review"]
+X_visual              = results["X_visual"]
+best_k                = results["best_k"]
+kmeans_silhouette     = results["kmeans_silhouette"]
+mb_best_k             = results["mb_best_k"]
+mb_kmeans_silhouette  = results["mb_kmeans_silhouette"]
+n_clusters            = results["n_clusters"]
+noise_points          = results["noise_points"]
+dbscan_silhouette     = results["dbscan_silhouette"]
+comparison_table      = results["comparison_table"]
+most_positive_brands  = results["most_positive_brands"]
+most_negative_brands  = results["most_negative_brands"]
+most_positive_products= results["most_positive_products"]
+most_negative_products= results["most_negative_products"]
+brand_sentiment       = results["brand_sentiment"]
+product_sentiment     = results["product_sentiment"]
 
 
 # ============================================================
@@ -308,50 +121,25 @@ def load_data_and_train():
 with st.sidebar:
     st.markdown("## 💄 Sephora Sentiment")
     st.markdown("---")
-
     page = st.radio(
-        "Navigate",
+        "Go to",
         [
             "🏠  Home",
             "📊  Sentiment Dashboard",
-            "🏷️  Brand Analysis",
+            "🏷️  Brand & Product Analysis",
             "🔵  Clustering Analysis",
             "🔮  Real-Time Prediction",
         ],
         label_visibility="collapsed"
     )
-
     st.markdown("---")
     st.markdown("**BICS 2303**")
     st.markdown("Intelligent Systems")
     st.markdown("Group Project")
     st.markdown("---")
-    st.markdown("Dataset: Sephora Reviews")
-    st.markdown("20,000 reviews sampled")
-
-
-# ============================================================
-# LOAD DATA
-# ============================================================
-
-# Check if CSV exists
-if not os.path.exists("reviews_sample.csv"):
-    st.error("❌ reviews_sample.csv not found! Please place it in the same folder as app.py")
-    st.stop()
-
-# Load everything
-data = load_data_and_train()
-df         = data["df"]
-nb         = data["nb"]
-tfidf      = data["tfidf"]
-le         = data["le"]
-best_k     = data["best_k"]
-km_sil     = data["km_sil"]
-km_inertia = data["km_inertia"]
-best_eps   = data["best_eps"]
-best_db_sil    = data["best_db_sil"]
-db_n_clusters  = data["db_n_clusters"]
-db_noise       = data["db_noise"]
+    st.markdown(f"**Total reviews:** {len(df):,}")
+    st.markdown(f"**Best K (KMeans):** {best_k}")
+    st.markdown(f"**Best K (MiniBatch):** {mb_best_k}")
 
 
 # ============================================================
@@ -360,104 +148,88 @@ db_noise       = data["db_noise"]
 
 if page == "🏠  Home":
 
-    st.markdown('<p class="page-title">💄 Sephora Sentiment Analysis Dashboard</p>', unsafe_allow_html=True)
-    st.markdown('<p class="page-subtitle">Organisation Analytics — Based purely on review text. Rating column not used.</p>', unsafe_allow_html=True)
+    st.markdown("# 💄 Sephora Skincare Review Sentiment Dashboard")
+    st.markdown("**Organisation Analytics View** — Sentiment determined from review text only. Rating column not used.")
+    st.divider()
 
     # ── Project overview ──────────────────────────────────
-    with st.container():
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.markdown("### 📋 Project Overview")
-        st.markdown("""
-        This dashboard analyses **Sephora skincare product reviews** to automatically determine
-        whether each review is **Positive**, **Negative**, or **Neutral** — using the review text only.
+    st.markdown("### 📋 Project Overview")
+    st.markdown("""
+    This dashboard analyses Sephora skincare product reviews to automatically classify
+    each review as **Positive**, **Negative**, or **Neutral** using the review text only.
 
-        **Two phases:**
-        - **Phase 1 — Sentiment Analysis:** VADER labels reviews automatically. Naive Bayes predicts sentiment.
-        - **Phase 2 — Clustering:** K-Means and DBSCAN group similar reviews to find hidden patterns.
+    **Phase 1 — Sentiment Analysis**
+    - VADER automatically labels each review from the text
+    - Multinomial Naive Bayes is trained to predict sentiment
 
-        **Business goal:** Identify which brands and products get the most positive and negative feedback.
-        """)
-        st.markdown('</div>', unsafe_allow_html=True)
+    **Phase 2 — Clustering**
+    - K-Means, Mini-Batch K-Means, and DBSCAN group similar reviews
+    - Silhouette Score selects the best configuration
 
-    # ── Dataset summary metrics ───────────────────────────
-    st.markdown('<p class="section-title">📦 Dataset Summary</p>', unsafe_allow_html=True)
+    **Phase 3 — Business Insight**
+    - Identifies which brands and products attract the most positive and negative feedback
+    """)
+    st.divider()
 
-    total   = len(df)
-    n_pos   = len(df[df["sentiment"] == "Positive"])
-    n_neg   = len(df[df["sentiment"] == "Negative"])
-    n_neu   = len(df[df["sentiment"] == "Neutral"])
-    avg_conf = round(df["confidence"].mean(), 1)
+    # ── Dataset summary ───────────────────────────────────
+    st.markdown('<p class="section-title">Dataset Summary</p>', unsafe_allow_html=True)
 
-    col1, col2, col3, col4, col5 = st.columns(5)
+    n_pos = len(df[df['sentiment_label'] == 'Positive'])
+    n_neg = len(df[df['sentiment_label'] == 'Negative'])
+    n_neu = len(df[df['sentiment_label'] == 'Neutral'])
 
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown(f"""<div class="metric-box">
-            <p class="metric-value">{total:,}</p>
+            <p class="metric-value">{len(df):,}</p>
             <p class="metric-label">Total Reviews</p>
         </div>""", unsafe_allow_html=True)
-
     with col2:
         st.markdown(f"""<div class="metric-box" style="border-top-color:#4CAF50">
             <p class="metric-value" style="color:#4CAF50">{n_pos:,}</p>
             <p class="metric-label">😊 Positive</p>
         </div>""", unsafe_allow_html=True)
-
     with col3:
         st.markdown(f"""<div class="metric-box" style="border-top-color:#f44336">
             <p class="metric-value" style="color:#f44336">{n_neg:,}</p>
             <p class="metric-label">😞 Negative</p>
         </div>""", unsafe_allow_html=True)
-
     with col4:
         st.markdown(f"""<div class="metric-box" style="border-top-color:#2196F3">
             <p class="metric-value" style="color:#2196F3">{n_neu:,}</p>
             <p class="metric-label">😐 Neutral</p>
         </div>""", unsafe_allow_html=True)
 
-    with col5:
-        st.markdown(f"""<div class="metric-box" style="border-top-color:#FF9800">
-            <p class="metric-value" style="color:#FF9800">{avg_conf}%</p>
-            <p class="metric-label">Avg Confidence</p>
-        </div>""", unsafe_allow_html=True)
-
     st.markdown("<br>", unsafe_allow_html=True)
 
     # ── Sentiment distribution bar chart ──────────────────
-    st.markdown('<p class="section-title">📊 Sentiment Distribution Overview</p>', unsafe_allow_html=True)
+    st.markdown('<p class="section-title">Sentiment Distribution</p>', unsafe_allow_html=True)
 
-    dist_df = pd.DataFrame({
-        "Sentiment": ["Positive", "Negative", "Neutral"],
-        "Count"    : [n_pos, n_neg, n_neu],
-        "Percent"  : [
-            round(n_pos/total*100, 1),
-            round(n_neg/total*100, 1),
-            round(n_neu/total*100, 1)
-        ]
-    })
+    fig, ax = plt.subplots(figsize=(6, 3))
+    colors  = ['#4CAF50', '#f44336', '#2196F3']
+    labels  = ['Positive', 'Negative', 'Neutral']
+    counts  = [n_pos, n_neg, n_neu]
+    bars    = ax.bar(labels, counts, color=colors, width=0.5)
+    for bar, count in zip(bars, counts):
+        ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 50,
+                f'{count:,}', ha='center', va='bottom', fontsize=10)
+    ax.set_ylabel("Number of Reviews")
+    ax.set_title("Sentiment Label Distribution")
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    st.pyplot(fig)
+    plt.close()
 
-    fig = px.bar(
-        dist_df, x="Sentiment", y="Count",
-        color="Sentiment",
-        color_discrete_map={"Positive":"#4CAF50","Negative":"#f44336","Neutral":"#2196F3"},
-        text="Percent",
-        title="Number of reviews per sentiment class"
-    )
-    fig.update_traces(texttemplate="%{text}%", textposition="outside")
-    fig.update_layout(showlegend=False, plot_bgcolor="white", height=350)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # ── Dataset info table ────────────────────────────────
-    st.markdown('<p class="section-title">📁 Dataset Information</p>', unsafe_allow_html=True)
-
+    # ── Dataset info ──────────────────────────────────────
+    st.markdown('<p class="section-title">Dataset Info</p>', unsafe_allow_html=True)
     info = pd.DataFrame({
-        "Item"  : ["Source", "File", "Rows sampled", "Labelling method", "Rating used?", "Columns used"],
+        "Item"  : ["Source", "File", "Columns used", "Labelling method", "Rating used?"],
         "Detail": [
             "Kaggle — nadyinky/sephora-products-and-skincare-reviews",
             "reviews_sample.csv",
-            "20,000 (random_state=42)",
+            "review_text, product_name, brand_name",
             "VADER (text-based, automatic)",
-            "❌ No — text only",
-            "review_text, brand_name, product_name"
+            "No — text only"
         ]
     })
     st.dataframe(info, use_container_width=True, hide_index=True)
@@ -469,234 +241,209 @@ if page == "🏠  Home":
 
 elif page == "📊  Sentiment Dashboard":
 
-    st.markdown('<p class="page-title">📊 Sentiment Analysis Dashboard</p>', unsafe_allow_html=True)
-    st.markdown('<p class="page-subtitle">How positive, negative, and neutral are the Sephora reviews?</p>', unsafe_allow_html=True)
+    st.markdown("# 📊 Sentiment Analysis Dashboard")
+    st.markdown("Naive Bayes model trained on VADER-labelled reviews.")
+    st.divider()
 
-    total = len(df)
-    n_pos = len(df[df["sentiment"] == "Positive"])
-    n_neg = len(df[df["sentiment"] == "Negative"])
-    n_neu = len(df[df["sentiment"] == "Neutral"])
+    # ── Accuracy metric ───────────────────────────────────
+    st.markdown('<p class="section-title">Model Performance</p>', unsafe_allow_html=True)
 
-    # ── Pie chart + Bar chart ─────────────────────────────
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown(f"""<div class="metric-box">
+            <p class="metric-value">{round(accuracy * 100, 2)}%</p>
+            <p class="metric-label">Accuracy Score</p>
+        </div>""", unsafe_allow_html=True)
+    with col2:
+        macro_f1 = round(clf_report.get('macro avg', {}).get('f1-score', 0) * 100, 2)
+        st.markdown(f"""<div class="metric-box" style="border-top-color:#FF9800">
+            <p class="metric-value" style="color:#FF9800">{macro_f1}%</p>
+            <p class="metric-label">Macro F1-Score</p>
+        </div>""", unsafe_allow_html=True)
+    with col3:
+        n_test = len(y_test)
+        st.markdown(f"""<div class="metric-box" style="border-top-color:#9C27B0">
+            <p class="metric-value" style="color:#9C27B0">{n_test:,}</p>
+            <p class="metric-label">Test Set Size (20%)</p>
+        </div>""", unsafe_allow_html=True)
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Pie + Bar charts ──────────────────────────────────
+    st.markdown('<p class="section-title">Sentiment Distribution Charts</p>', unsafe_allow_html=True)
+
+    n_pos = len(df[df['sentiment_label'] == 'Positive'])
+    n_neg = len(df[df['sentiment_label'] == 'Negative'])
+    n_neu = len(df[df['sentiment_label'] == 'Neutral'])
+
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown('<p class="section-title">Sentiment Split (Pie Chart)</p>', unsafe_allow_html=True)
-        fig_pie = px.pie(
-            values=[n_pos, n_neg, n_neu],
-            names=["Positive", "Negative", "Neutral"],
-            color_discrete_sequence=["#4CAF50", "#f44336", "#2196F3"],
-            hole=0.4
+        st.markdown("**Pie Chart**")
+        fig, ax = plt.subplots(figsize=(5, 4))
+        ax.pie(
+            [n_pos, n_neg, n_neu],
+            labels=['Positive', 'Negative', 'Neutral'],
+            colors=['#4CAF50', '#f44336', '#2196F3'],
+            autopct='%1.1f%%',
+            startangle=90,
+            wedgeprops={'edgecolor': 'white', 'linewidth': 2}
         )
-        fig_pie.update_traces(textinfo="percent+label")
-        fig_pie.update_layout(showlegend=True, height=350)
-        st.plotly_chart(fig_pie, use_container_width=True)
+        ax.set_title("Sentiment Distribution")
+        st.pyplot(fig)
+        plt.close()
 
     with col2:
-        st.markdown('<p class="section-title">Sentiment Count (Bar Chart)</p>', unsafe_allow_html=True)
-        fig_bar = px.bar(
-            x=["Positive", "Negative", "Neutral"],
-            y=[n_pos, n_neg, n_neu],
-            color=["Positive", "Negative", "Neutral"],
-            color_discrete_map={"Positive":"#4CAF50","Negative":"#f44336","Neutral":"#2196F3"},
-            labels={"x": "Sentiment", "y": "Count"},
-            text=[n_pos, n_neg, n_neu]
+        st.markdown("**Bar Chart**")
+        fig, ax = plt.subplots(figsize=(5, 4))
+        bars = ax.bar(
+            ['Positive', 'Negative', 'Neutral'],
+            [n_pos, n_neg, n_neu],
+            color=['#4CAF50', '#f44336', '#2196F3'],
+            width=0.5
         )
-        fig_bar.update_traces(textposition="outside")
-        fig_bar.update_layout(showlegend=False, plot_bgcolor="white", height=350)
-        st.plotly_chart(fig_bar, use_container_width=True)
+        for bar, count in zip(bars, [n_pos, n_neg, n_neu]):
+            ax.text(bar.get_x() + bar.get_width()/2,
+                    bar.get_height() + 30,
+                    f'{count:,}', ha='center', fontsize=10)
+        ax.set_ylabel("Count")
+        ax.set_title("Sentiment Counts")
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+        st.pyplot(fig)
+        plt.close()
 
-    # ── Confidence distribution ───────────────────────────
-    st.markdown('<p class="section-title">Model Confidence Distribution</p>', unsafe_allow_html=True)
-    fig_conf = px.histogram(
-        df, x="confidence", color="sentiment",
-        color_discrete_map={"Positive":"#4CAF50","Negative":"#f44336","Neutral":"#2196F3"},
-        nbins=20,
-        labels={"confidence":"Confidence %", "count":"Number of Reviews"},
-        title="How confident is the Naive Bayes model for each prediction?"
+    # ── Classification report ─────────────────────────────
+    st.markdown('<p class="section-title">Classification Report</p>', unsafe_allow_html=True)
+    st.code(clf_report_text)
+
+    # ── Confusion matrix ──────────────────────────────────
+    st.markdown('<p class="section-title">Confusion Matrix</p>', unsafe_allow_html=True)
+    labels = sorted(df['sentiment_label'].unique())
+    fig, ax = plt.subplots(figsize=(5, 4))
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt='d',
+        cmap='Blues',
+        xticklabels=labels,
+        yticklabels=labels,
+        ax=ax
     )
-    fig_conf.update_layout(plot_bgcolor="white", height=320)
-    st.plotly_chart(fig_conf, use_container_width=True)
+    ax.set_xlabel("Predicted Label")
+    ax.set_ylabel("True Label")
+    ax.set_title("Confusion Matrix")
+    st.pyplot(fig)
+    plt.close()
 
-    # ── Sample reviews by sentiment ───────────────────────
+    # ── Sample reviews ────────────────────────────────────
     st.markdown('<p class="section-title">Sample Reviews by Sentiment</p>', unsafe_allow_html=True)
+    tab1, tab2, tab3 = st.tabs(["😊 Positive", "😞 Negative", "😐 Neutral"])
 
-    tab_pos, tab_neg, tab_neu = st.tabs(["😊 Positive Reviews", "😞 Negative Reviews", "😐 Neutral Reviews"])
-
-    def show_sample_reviews(sentiment, n=5):
-        """Show n sample reviews for a given sentiment."""
-        samples = df[df["sentiment"] == sentiment].head(n)
-        for _, row in samples.iterrows():
-            st.markdown(f"""
-            <div class="card" style="border-left: 4px solid {sentiment_color(sentiment)};">
-                <p style="font-size:14px; color:#333; margin:0;">
-                    "{str(row['review_text'])[:200]}..."
-                </p>
-                <p style="font-size:12px; color:#888; margin:4px 0 0;">
-                    Confidence: <b>{row['confidence']}%</b> &nbsp;|&nbsp;
-                    VADER score: <b>{row['compound_score']}</b>
-                </p>
-            </div>
-            """, unsafe_allow_html=True)
-
-    with tab_pos:
-        show_sample_reviews("Positive")
-    with tab_neg:
-        show_sample_reviews("Negative")
-    with tab_neu:
-        show_sample_reviews("Neutral")
+    with tab1:
+        samples = df[df['sentiment_label'] == 'Positive'][['review_text', 'compound_score']].head(5)
+        st.dataframe(samples, use_container_width=True)
+    with tab2:
+        samples = df[df['sentiment_label'] == 'Negative'][['review_text', 'compound_score']].head(5)
+        st.dataframe(samples, use_container_width=True)
+    with tab3:
+        samples = df[df['sentiment_label'] == 'Neutral'][['review_text', 'compound_score']].head(5)
+        st.dataframe(samples, use_container_width=True)
 
 
 # ============================================================
-# PAGE 3 — BRAND ANALYSIS
+# PAGE 3 — BRAND & PRODUCT ANALYSIS
 # ============================================================
 
-elif page == "🏷️  Brand Analysis":
+elif page == "🏷️  Brand & Product Analysis":
 
-    st.markdown('<p class="page-title">🏷️ Brand & Product Analysis</p>', unsafe_allow_html=True)
-    st.markdown('<p class="page-subtitle">Which brands and products receive the most positive and negative reviews?</p>', unsafe_allow_html=True)
+    st.markdown("# 🏷️ Brand & Product Analysis")
+    st.markdown("Based purely on review text sentiment. Rating column not used.")
+    st.divider()
 
-    if "brand_name" not in df.columns:
-        st.warning("brand_name column not found in dataset.")
-    else:
+    # ── Most positive brand ───────────────────────────────
+    st.markdown('<p class="section-title">Most Positive Brand</p>', unsafe_allow_html=True)
+    st.dataframe(
+        most_positive_brands[['Positive', 'Total', 'Positive_Percentage']].head(1),
+        use_container_width=True
+    )
 
-        # ── Top 5 brands — positive ───────────────────────
-        col1, col2 = st.columns(2)
+    # ── Most negative brand ───────────────────────────────
+    st.markdown('<p class="section-title">Most Negative Brand</p>', unsafe_allow_html=True)
+    st.dataframe(
+        most_negative_brands[['Negative', 'Total', 'Negative_Percentage']].head(1),
+        use_container_width=True
+    )
 
-        with col1:
-            st.markdown('<p class="section-title">Top 5 Brands — Most Positive Reviews</p>', unsafe_allow_html=True)
-            top_pos_brands = (
-                df[df["sentiment"] == "Positive"]
-                .groupby("brand_name").size()
-                .sort_values(ascending=False)
-                .head(5).reset_index()
-            )
-            top_pos_brands.columns = ["Brand", "Positive Reviews"]
-            fig = px.bar(
-                top_pos_brands, x="Positive Reviews", y="Brand",
-                orientation="h", color_discrete_sequence=["#4CAF50"],
-                text="Positive Reviews"
-            )
-            fig.update_traces(textposition="outside")
-            fig.update_layout(
-                plot_bgcolor="white", height=300,
-                yaxis=dict(autorange="reversed")
-            )
-            st.plotly_chart(fig, use_container_width=True)
+    # ── Top 5 positive brands chart ───────────────────────
+    st.markdown('<p class="section-title">Top 5 Brands — Most Positive Reviews</p>', unsafe_allow_html=True)
+    top5_pos = most_positive_brands.head(5).reset_index()
 
-        with col2:
-            st.markdown('<p class="section-title">Top 5 Brands — Most Negative Reviews</p>', unsafe_allow_html=True)
-            top_neg_brands = (
-                df[df["sentiment"] == "Negative"]
-                .groupby("brand_name").size()
-                .sort_values(ascending=False)
-                .head(5).reset_index()
-            )
-            top_neg_brands.columns = ["Brand", "Negative Reviews"]
-            fig2 = px.bar(
-                top_neg_brands, x="Negative Reviews", y="Brand",
-                orientation="h", color_discrete_sequence=["#f44336"],
-                text="Negative Reviews"
-            )
-            fig2.update_traces(textposition="outside")
-            fig2.update_layout(
-                plot_bgcolor="white", height=300,
-                yaxis=dict(autorange="reversed")
-            )
-            st.plotly_chart(fig2, use_container_width=True)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    bars = ax.barh(
+        top5_pos['brand_name'],
+        top5_pos['Positive_Percentage'],
+        color='#4CAF50'
+    )
+    for bar, val in zip(bars, top5_pos['Positive_Percentage']):
+        ax.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2,
+                f'{val:.1f}%', va='center', fontsize=9)
+    ax.set_xlabel("Positive Review %")
+    ax.set_title("Top 5 Most Positive Brands")
+    ax.invert_yaxis()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    st.pyplot(fig)
+    plt.close()
 
-        # ── Top 5 products — positive ─────────────────────
-        if "product_name" in df.columns:
-            col3, col4 = st.columns(2)
+    # ── Top 5 negative brands chart ───────────────────────
+    st.markdown('<p class="section-title">Top 5 Brands — Most Negative Reviews</p>', unsafe_allow_html=True)
+    top5_neg = most_negative_brands.head(5).reset_index()
 
-            with col3:
-                st.markdown('<p class="section-title">Top 5 Products — Most Positive Reviews</p>', unsafe_allow_html=True)
-                top_pos_prods = (
-                    df[df["sentiment"] == "Positive"]
-                    .groupby("product_name").size()
-                    .sort_values(ascending=False)
-                    .head(5).reset_index()
-                )
-                top_pos_prods.columns = ["Product", "Positive Reviews"]
-                top_pos_prods["Product"] = top_pos_prods["Product"].str[:30]
-                fig3 = px.bar(
-                    top_pos_prods, x="Positive Reviews", y="Product",
-                    orientation="h", color_discrete_sequence=["#66BB6A"],
-                    text="Positive Reviews"
-                )
-                fig3.update_traces(textposition="outside")
-                fig3.update_layout(
-                    plot_bgcolor="white", height=300,
-                    yaxis=dict(autorange="reversed")
-                )
-                st.plotly_chart(fig3, use_container_width=True)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    bars = ax.barh(
+        top5_neg['brand_name'],
+        top5_neg['Negative_Percentage'],
+        color='#f44336'
+    )
+    for bar, val in zip(bars, top5_neg['Negative_Percentage']):
+        ax.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height()/2,
+                f'{val:.1f}%', va='center', fontsize=9)
+    ax.set_xlabel("Negative Review %")
+    ax.set_title("Top 5 Most Negative Brands")
+    ax.invert_yaxis()
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    st.pyplot(fig)
+    plt.close()
 
-            with col4:
-                st.markdown('<p class="section-title">Top 5 Products — Most Negative Reviews</p>', unsafe_allow_html=True)
-                top_neg_prods = (
-                    df[df["sentiment"] == "Negative"]
-                    .groupby("product_name").size()
-                    .sort_values(ascending=False)
-                    .head(5).reset_index()
-                )
-                top_neg_prods.columns = ["Product", "Negative Reviews"]
-                top_neg_prods["Product"] = top_neg_prods["Product"].str[:30]
-                fig4 = px.bar(
-                    top_neg_prods, x="Negative Reviews", y="Product",
-                    orientation="h", color_discrete_sequence=["#EF5350"],
-                    text="Negative Reviews"
-                )
-                fig4.update_traces(textposition="outside")
-                fig4.update_layout(
-                    plot_bgcolor="white", height=300,
-                    yaxis=dict(autorange="reversed")
-                )
-                st.plotly_chart(fig4, use_container_width=True)
+    # ── Most positive product ─────────────────────────────
+    st.markdown('<p class="section-title">Most Positive Product</p>', unsafe_allow_html=True)
+    st.dataframe(
+        most_positive_products[['Positive', 'Total', 'Positive_Percentage']].head(1),
+        use_container_width=True
+    )
 
-        # ── Average sentiment score by brand ──────────────
-        st.markdown('<p class="section-title">Average Sentiment Score by Brand (Top 10)</p>', unsafe_allow_html=True)
+    # ── Most negative product ─────────────────────────────
+    st.markdown('<p class="section-title">Most Negative Product</p>', unsafe_allow_html=True)
+    st.dataframe(
+        most_negative_products[['Negative', 'Total', 'Negative_Percentage']].head(1),
+        use_container_width=True
+    )
 
-        top10_brands = df["brand_name"].value_counts().head(10).index
-        avg_scores   = (
-            df[df["brand_name"].isin(top10_brands)]
-            .groupby("brand_name")["compound_score"]
-            .mean().round(3)
-            .sort_values(ascending=False)
-            .reset_index()
-        )
-        avg_scores.columns = ["Brand", "Avg Compound Score"]
+    # ── Full brand sentiment table ─────────────────────────
+    st.markdown('<p class="section-title">Full Brand Sentiment Table</p>', unsafe_allow_html=True)
+    st.dataframe(
+        brand_sentiment.sort_values('Positive_Percentage', ascending=False),
+        use_container_width=True
+    )
 
-        fig5 = px.bar(
-            avg_scores, x="Brand", y="Avg Compound Score",
-            color="Avg Compound Score",
-            color_continuous_scale=["#f44336", "#FF9800", "#4CAF50"],
-            text="Avg Compound Score",
-            title="Higher score = more positive overall sentiment"
-        )
-        fig5.update_traces(textposition="outside")
-        fig5.update_layout(plot_bgcolor="white", height=380)
-        st.plotly_chart(fig5, use_container_width=True)
-
-        # ── Full brand breakdown table ─────────────────────
-        st.markdown('<p class="section-title">Full Brand Sentiment Breakdown (Top 15 Brands)</p>', unsafe_allow_html=True)
-
-        top15       = df["brand_name"].value_counts().head(15).index
-        brand_table = (
-            df[df["brand_name"].isin(top15)]
-            .groupby(["brand_name", "sentiment"])
-            .size().unstack(fill_value=0)
-        )
-        for col in ["Positive", "Negative", "Neutral"]:
-            if col not in brand_table.columns:
-                brand_table[col] = 0
-
-        brand_table["Total"] = brand_table.sum(axis=1)
-        brand_table["Pos %"] = (brand_table["Positive"] / brand_table["Total"] * 100).round(1)
-        brand_table["Neg %"] = (brand_table["Negative"] / brand_table["Total"] * 100).round(1)
-        brand_table = brand_table.sort_values("Pos %", ascending=False)
-        brand_table.index.name = "Brand"
-
-        st.dataframe(brand_table, use_container_width=True)
+    # ── Full product sentiment table ───────────────────────
+    st.markdown('<p class="section-title">Full Product Sentiment Table</p>', unsafe_allow_html=True)
+    st.dataframe(
+        product_sentiment.sort_values('Positive_Percentage', ascending=False),
+        use_container_width=True
+    )
 
 
 # ============================================================
@@ -705,144 +452,161 @@ elif page == "🏷️  Brand Analysis":
 
 elif page == "🔵  Clustering Analysis":
 
-    st.markdown('<p class="page-title">🔵 Clustering Analysis</p>', unsafe_allow_html=True)
-    st.markdown('<p class="page-subtitle">K-Means vs DBSCAN — which algorithm clusters reviews better?</p>', unsafe_allow_html=True)
+    st.markdown("# 🔵 Clustering Analysis")
+    st.markdown("K-Means, Mini-Batch K-Means, and DBSCAN — all on the same page.")
+    st.divider()
 
     # ── Metrics row ───────────────────────────────────────
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    metrics = [
-        ("Best K",          str(best_k),          "#ff0050"),
-        ("K-Means Sil.",    str(km_sil),           "#4CAF50"),
-        ("Inertia",         f"{km_inertia:,.0f}",  "#FF9800"),
-        ("DBSCAN Clusters", str(db_n_clusters),    "#2196F3"),
-        ("Noise Points",    f"{db_noise:,}",       "#9C27B0"),
-        ("DBSCAN Sil.",     str(best_db_sil),      "#00BCD4"),
-    ]
-    for col, (label, value, color) in zip([col1,col2,col3,col4,col5,col6], metrics):
-        with col:
-            st.markdown(f"""<div class="metric-box" style="border-top-color:{color}">
-                <p class="metric-value" style="color:{color}; font-size:20px">{value}</p>
-                <p class="metric-label">{label}</p>
-            </div>""", unsafe_allow_html=True)
+    st.markdown('<p class="section-title">Clustering Summary Metrics</p>', unsafe_allow_html=True)
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        st.markdown(f"""<div class="metric-box">
+            <p class="metric-value">{best_k}</p>
+            <p class="metric-label">KMeans Best K</p>
+        </div>""", unsafe_allow_html=True)
+    with col2:
+        st.markdown(f"""<div class="metric-box" style="border-top-color:#4CAF50">
+            <p class="metric-value">{kmeans_silhouette}</p>
+            <p class="metric-label">KMeans Silhouette</p>
+        </div>""", unsafe_allow_html=True)
+    with col3:
+        st.markdown(f"""<div class="metric-box" style="border-top-color:#FF9800">
+            <p class="metric-value">{mb_best_k}</p>
+            <p class="metric-label">MiniBatch Best K</p>
+        </div>""", unsafe_allow_html=True)
+    with col4:
+        st.markdown(f"""<div class="metric-box" style="border-top-color:#9C27B0">
+            <p class="metric-value">{mb_kmeans_silhouette}</p>
+            <p class="metric-label">MiniBatch Silhouette</p>
+        </div>""", unsafe_allow_html=True)
+    with col5:
+        st.markdown(f"""<div class="metric-box" style="border-top-color:#2196F3">
+            <p class="metric-value">{dbscan_silhouette}</p>
+            <p class="metric-label">DBSCAN Silhouette</p>
+        </div>""", unsafe_allow_html=True)
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── K-Means visualization ─────────────────────────────
-    st.markdown('<p class="section-title">K-Means Clustering Results</p>', unsafe_allow_html=True)
+    # ── K-Means visualisation — original seaborn code ─────
+    st.markdown('<p class="section-title">K-Means Clustering Visualisation</p>', unsafe_allow_html=True)
 
     col1, col2 = st.columns(2)
 
     with col1:
-        # Reviews per cluster bar chart
-        km_dist = df["km_cluster"].value_counts().sort_index().reset_index()
-        km_dist.columns = ["Cluster", "Reviews"]
-        km_dist["Cluster"] = km_dist["Cluster"].apply(lambda x: f"Cluster {x}")
-
-        fig_km = px.bar(
-            km_dist, x="Cluster", y="Reviews",
-            color="Cluster", text="Reviews",
-            title=f"Reviews per K-Means cluster (K={best_k})"
+        # Scatter plot — original seaborn code preserved
+        fig, ax = plt.subplots(figsize=(6, 5))
+        sns.scatterplot(
+            x=X_visual[:, 0],
+            y=X_visual[:, 1],
+            hue=df['kmeans_cluster'],
+            palette='viridis',
+            s=40,
+            ax=ax
         )
-        fig_km.update_traces(textposition="outside")
-        fig_km.update_layout(showlegend=False, plot_bgcolor="white", height=320)
-        st.plotly_chart(fig_km, use_container_width=True)
+        ax.set_title("K-Means Clustering")
+        ax.set_xlabel("Component 1")
+        ax.set_ylabel("Component 2")
+        st.pyplot(fig)
+        plt.close()
 
     with col2:
-        # Dominant sentiment per cluster
-        st.markdown("**Dominant sentiment per cluster:**")
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        for c in sorted(df["km_cluster"].unique()):
-            cluster_df  = df[df["km_cluster"] == c]
-            top_label   = cluster_df["sentiment"].value_counts().index[0]
-            top_count   = cluster_df["sentiment"].value_counts().iloc[0]
-            total_c     = len(cluster_df)
-            avg_score   = round(cluster_df["compound_score"].mean(), 3)
-            emoji       = sentiment_emoji(top_label)
-            color       = sentiment_color(top_label)
-
+        # Cluster analysis — original logic preserved
+        st.markdown("**Cluster statistics:**")
+        cluster_counts = df['kmeans_cluster'].value_counts()
+        for cluster, count in cluster_counts.items():
+            percentage = (count / len(df)) * 100
+            cluster_data       = df[df['kmeans_cluster'] == cluster]
+            dominant_sentiment = cluster_data['sentiment_label'].mode()[0]
             st.markdown(f"""
-            <div class="card" style="border-left:4px solid {color}; margin-bottom:8px;">
-                <b>Cluster {c}</b> — {emoji} mostly <b>{top_label}</b><br>
-                <span style="font-size:12px; color:#666;">
-                    {total_c:,} reviews &nbsp;|&nbsp;
-                    Dominant: {top_count:,} ({round(top_count/total_c*100,1)}%) &nbsp;|&nbsp;
-                    Avg score: {avg_score}
-                </span>
-            </div>
-            """, unsafe_allow_html=True)
+            **Cluster {cluster}**
+            - Reviews: {count:,} ({percentage:.2f}%)
+            - Dominant sentiment: {dominant_sentiment}
+            """)
 
-    # ── DBSCAN visualization ──────────────────────────────
-    st.markdown('<p class="section-title">DBSCAN Clustering Results</p>', unsafe_allow_html=True)
+    # ── Mini-Batch K-Means visualisation ──────────────────
+    st.markdown('<p class="section-title">Mini-Batch K-Means Clustering Visualisation</p>', unsafe_allow_html=True)
 
     col3, col4 = st.columns(2)
 
     with col3:
-        db_dist = df["db_cluster"].value_counts().sort_index().reset_index()
-        db_dist.columns = ["Cluster", "Reviews"]
-        db_dist["Label"] = db_dist["Cluster"].apply(
-            lambda x: "Noise (-1)" if x == -1 else f"Cluster {x}"
+        fig, ax = plt.subplots(figsize=(6, 5))
+        sns.scatterplot(
+            x=X_visual[:, 0],
+            y=X_visual[:, 1],
+            hue=df['minibatch_kmeans_cluster'],
+            palette='plasma',
+            s=40,
+            ax=ax
         )
-        fig_db = px.bar(
-            db_dist, x="Label", y="Reviews",
-            color="Label", text="Reviews",
-            title=f"Reviews per DBSCAN cluster (eps={best_eps})"
-        )
-        fig_db.update_traces(textposition="outside")
-        fig_db.update_layout(showlegend=False, plot_bgcolor="white", height=320)
-        st.plotly_chart(fig_db, use_container_width=True)
+        ax.set_title("Mini-Batch K-Means Clustering")
+        ax.set_xlabel("Component 1")
+        ax.set_ylabel("Component 2")
+        st.pyplot(fig)
+        plt.close()
 
     with col4:
-        st.markdown("**DBSCAN cluster info:**")
-        st.markdown("<br>", unsafe_allow_html=True)
-
-        for c in sorted(df["db_cluster"].unique()):
-            label_name = "Noise (outliers)" if c == -1 else f"Cluster {c}"
-            cluster_df = df[df["db_cluster"] == c]
-            count      = len(cluster_df)
-            pct        = round(count / len(df) * 100, 1)
-            color      = "#9C27B0" if c == -1 else "#2196F3"
-
+        st.markdown("**Cluster statistics:**")
+        mb_counts = df['minibatch_kmeans_cluster'].value_counts()
+        for cluster, count in mb_counts.items():
+            percentage = (count / len(df)) * 100
+            cluster_data       = df[df['minibatch_kmeans_cluster'] == cluster]
+            dominant_sentiment = cluster_data['sentiment_label'].mode()[0]
             st.markdown(f"""
-            <div class="card" style="border-left:4px solid {color}; margin-bottom:8px;">
-                <b>{label_name}</b><br>
-                <span style="font-size:12px; color:#666;">
-                    {count:,} reviews ({pct}% of total)
-                    {"— reviews that don't fit any cluster" if c == -1 else ""}
-                </span>
-            </div>
-            """, unsafe_allow_html=True)
+            **Cluster {cluster}**
+            - Reviews: {count:,} ({percentage:.2f}%)
+            - Dominant sentiment: {dominant_sentiment}
+            """)
 
-    # ── Comparison table ──────────────────────────────────
-    st.markdown('<p class="section-title">K-Means vs DBSCAN Comparison</p>', unsafe_allow_html=True)
+    # ── DBSCAN visualisation — original seaborn code ──────
+    st.markdown('<p class="section-title">DBSCAN Clustering Visualisation</p>', unsafe_allow_html=True)
 
-    winner = "K-Means" if km_sil >= best_db_sil else "DBSCAN"
+    col5, col6 = st.columns(2)
 
-    comp_df = pd.DataFrame({
-        "Metric"              : ["Silhouette Score", "Clusters Found", "Noise Points", "Needs K upfront?", "Detects outliers?", "Cluster shape assumed"],
-        "K-Means"             : [km_sil,   best_k,        "0",   "Yes", "No",  "Spherical"],
-        "DBSCAN"              : [best_db_sil, db_n_clusters, f"{db_noise:,}", "No",  "Yes", "Any shape"],
-    })
-    st.dataframe(comp_df, use_container_width=True, hide_index=True)
+    with col5:
+        # Scatter plot — original seaborn code preserved
+        fig, ax = plt.subplots(figsize=(6, 5))
+        sns.scatterplot(
+            x=X_visual[:, 0],
+            y=X_visual[:, 1],
+            hue=df['dbscan_cluster'],
+            palette='plasma',
+            s=40,
+            ax=ax
+        )
+        ax.set_title("DBSCAN Clustering")
+        ax.set_xlabel("Component 1")
+        ax.set_ylabel("Component 2")
+        st.pyplot(fig)
+        plt.close()
 
-    if winner == "K-Means":
-        st.success(f"✅ K-Means performed better — Silhouette Score: {km_sil} vs {best_db_sil}")
+    with col6:
+        # DBSCAN cluster analysis — original logic preserved
+        st.markdown("**Cluster statistics:**")
+        dbscan_counts = df['dbscan_cluster'].value_counts()
+        for cluster, count in dbscan_counts.items():
+            percentage = (count / len(df)) * 100
+            if cluster == -1:
+                st.markdown(f"""
+                **Noise Points**
+                - Reviews: {count:,} ({percentage:.2f}%)
+                - These reviews do not belong to any cluster
+                """)
+            else:
+                st.markdown(f"""
+                **Cluster {cluster}**
+                - Reviews: {count:,} ({percentage:.2f}%)
+                """)
+
+    # ── Comparison table — original logic preserved ────────
+    st.markdown('<p class="section-title">K-Means vs DBSCAN Comparison Table</p>', unsafe_allow_html=True)
+    st.dataframe(comparison_table, use_container_width=True, hide_index=True)
+
+    # Best model — original logic preserved
+    if kmeans_silhouette > dbscan_silhouette:
+        st.success("✅ Better clustering model: **K-Means** — Reason: Higher silhouette score")
     else:
-        st.success(f"✅ DBSCAN performed better — Silhouette Score: {best_db_sil} vs {km_sil}")
-
-    # ── What is Silhouette Score ───────────────────────────
-    with st.expander("ℹ️ What is Silhouette Score?"):
-        st.markdown("""
-        **Silhouette Score** measures how well each review fits its assigned cluster.
-
-        - **Score close to +1.0** → reviews are well-separated and clearly grouped
-        - **Score near 0** → reviews are on the boundary between clusters
-        - **Negative score** → reviews may be in the wrong cluster
-
-        Formula: `(b - a) / max(a, b)`
-        where `a` = average distance to same-cluster reviews,
-        `b` = average distance to nearest other cluster reviews.
-        """)
+        st.success("✅ Better clustering model: **DBSCAN** — Reason: Higher silhouette score")
 
 
 # ============================================================
@@ -851,121 +615,83 @@ elif page == "🔵  Clustering Analysis":
 
 elif page == "🔮  Real-Time Prediction":
 
-    st.markdown('<p class="page-title">🔮 Real-Time Sentiment Prediction</p>', unsafe_allow_html=True)
-    st.markdown('<p class="page-subtitle">Type any skincare review — the model predicts its sentiment instantly.</p>', unsafe_allow_html=True)
+    st.markdown("# 🔮 Real-Time Sentiment Prediction")
+    st.markdown("Enter any review — the trained Naive Bayes model predicts its sentiment.")
+    st.divider()
 
-    # ── Input area ────────────────────────────────────────
+    # ── Input ─────────────────────────────────────────────
     st.markdown('<p class="section-title">Enter a Review</p>', unsafe_allow_html=True)
 
-    user_review = st.text_area(
-        "Type or paste a skincare product review here:",
-        placeholder="e.g. This moisturiser is absolutely amazing! My skin feels so soft and hydrated...",
-        height=140,
+    custom_review = st.text_area(
+        "Type or paste a review here:",
+        placeholder="e.g. This moisturiser is absolutely amazing! My skin feels so soft...",
+        height=130,
         label_visibility="collapsed"
     )
 
-    col_btn1, col_btn2 = st.columns([1, 4])
-    with col_btn1:
-        predict_btn = st.button("🔮 Predict Sentiment", type="primary", use_container_width=True)
-    with col_btn2:
-        clear_btn = st.button("🗑️ Clear", use_container_width=False)
+    predict_btn = st.button("🔮 Predict Sentiment", type="primary")
 
-    # ── Prediction ────────────────────────────────────────
+    # ── Prediction — calls original predict_new_review() ──
     if predict_btn:
-        if user_review.strip() == "":
+        if custom_review.strip() == "":
             st.warning("⚠️ Please enter a review first!")
         else:
-            # Preprocess and predict
-            cleaned    = preprocess_text(user_review)
-            vectorised = tfidf.transform([cleaned])
-            pred       = nb.predict(vectorised)[0]
-            proba      = nb.predict_proba(vectorised)[0]
-            label      = le.inverse_transform([pred])[0]
-            conf       = round(float(proba[pred]) * 100, 1)
-            vader_sc   = get_compound_score(user_review)
-            vader_lbl  = get_vader_label(user_review)
-            emoji      = sentiment_emoji(label)
-            color      = sentiment_color(label)
+            # Calls the exact original predict_new_review() from pipeline
+            result = predict_new_review(custom_review)
 
-            # Result display
+            # Display result
             st.markdown("---")
-            st.markdown('<p class="section-title">Prediction Result</p>', unsafe_allow_html=True)
+            st.markdown("### Prediction Result")
 
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.markdown(f"""<div class="metric-box" style="border-top-color:{color}">
-                    <p class="metric-value">{emoji} {label}</p>
-                    <p class="metric-label">Naive Bayes Prediction</p>
-                </div>""", unsafe_allow_html=True)
-            with col2:
-                st.markdown(f"""<div class="metric-box" style="border-top-color:#FF9800">
-                    <p class="metric-value">{conf}%</p>
-                    <p class="metric-label">Confidence Score</p>
-                </div>""", unsafe_allow_html=True)
-            with col3:
-                st.markdown(f"""<div class="metric-box" style="border-top-color:#9C27B0">
-                    <p class="metric-value">{vader_sc}</p>
-                    <p class="metric-label">VADER Compound Score</p>
-                </div>""", unsafe_allow_html=True)
-            with col4:
-                st.markdown(f"""<div class="metric-box" style="border-top-color:{sentiment_color(vader_lbl)}">
-                    <p class="metric-value">{sentiment_emoji(vader_lbl)} {vader_lbl}</p>
-                    <p class="metric-label">VADER Label</p>
-                </div>""", unsafe_allow_html=True)
-
-            st.markdown("<br>", unsafe_allow_html=True)
-
-            # Colour-coded result banner
-            if label == "Positive":
-                st.success(f"😊 This review expresses a **positive** experience! The model is {conf}% confident.")
-            elif label == "Negative":
-                st.error(f"😞 This review expresses a **negative** experience. The model is {conf}% confident.")
+            if result == "Positive":
+                st.success(f"😊 **Predicted Sentiment: {result}**")
+            elif result == "Negative":
+                st.error(f"😞 **Predicted Sentiment: {result}**")
             else:
-                st.info(f"😐 This review is **neutral** — no strong sentiment detected. Confidence: {conf}%.")
+                st.info(f"😐 **Predicted Sentiment: {result}**")
 
-            # Probability breakdown
-            st.markdown("<br>", unsafe_allow_html=True)
-            st.markdown("**Probability breakdown for all three classes:**")
-            prob_df = pd.DataFrame({
-                "Sentiment": le.classes_,
-                "Probability %": [round(float(p)*100, 1) for p in proba]
-            }).sort_values("Probability %", ascending=False)
+            # Also show VADER score for reference
+            from pipeline import get_compound_score, assign_sentiment_label
+            compound = get_compound_score(custom_review)
+            vader_label = assign_sentiment_label(compound)
 
-            fig_prob = px.bar(
-                prob_df, x="Sentiment", y="Probability %",
-                color="Sentiment",
-                color_discrete_map={"Positive":"#4CAF50","Negative":"#f44336","Neutral":"#2196F3"},
-                text="Probability %",
-                title="How confident is the model for each class?"
-            )
-            fig_prob.update_traces(texttemplate="%{text}%", textposition="outside")
-            fig_prob.update_layout(showlegend=False, plot_bgcolor="white", height=300)
-            st.plotly_chart(fig_prob, use_container_width=True)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Naive Bayes Prediction", result)
+            with col2:
+                st.metric("VADER Compound Score", compound)
 
-    # ── Try example reviews ───────────────────────────────
-    st.markdown("---")
-    st.markdown('<p class="section-title">Try These Example Reviews</p>', unsafe_allow_html=True)
+    st.divider()
 
-    examples = [
-        ("Positive example", "This moisturiser is absolutely amazing! My skin has never felt so soft and hydrated. I noticed a difference after just one week. Highly recommend to everyone!"),
-        ("Negative example", "Worst product I have ever bought. Broke me out badly and caused severe redness. Complete waste of money. Do not buy!"),
-        ("Neutral example",  "It is okay I guess. Does what it says but nothing special. The texture is fine. Not sure if I would repurchase."),
+    # ── Demo tests — original demo cases ──────────────────
+    st.markdown('<p class="section-title">Demo Testing — Original Cases</p>', unsafe_allow_html=True)
+    st.markdown("These are the exact 3 demo cases from the original code.")
+
+    demo_reviews = [
+        ("Test 1 — Positive", "This moisturizer is amazing!"),
+        ("Test 2 — Negative", "Do not buy"),
+        ("Test 3 — Neutral",  "The product is okay."),
     ]
 
-    for title, review in examples:
-        with st.expander(f"📝 {title}"):
+    for title, review in demo_reviews:
+        result = predict_new_review(review)
+        emoji  = "😊" if result == "Positive" else "😞" if result == "Negative" else "😐"
+        col1, col2, col3 = st.columns([2, 2, 1])
+        with col1:
+            st.markdown(f"**{title}**")
             st.markdown(f"*{review}*")
-            st.code(f'predict_sentiment("{review[:50]}...")')
+        with col2:
+            st.markdown(f"**Predicted:** {emoji} {result}")
+        with col3:
+            st.markdown("")
+        st.markdown("---")
 
 
-# ============================================================
-# FOOTER
-# ============================================================
-
+# ── Footer ────────────────────────────────────────────────
 st.markdown("""
 <div style='text-align:center; color:#bbb; font-size:12px; padding:2rem 0 1rem;'>
-    BICS 2303 — Intelligent Systems | Group Project &nbsp;|&nbsp;
-    Sephora Skincare Review Sentiment Analysis &nbsp;|&nbsp;
-    Dataset: Kaggle (nadyinky) — 20,000 reviews
+    BICS 2303 — Intelligent Systems | Group Project |
+    Sephora Skincare Review Sentiment Analysis |
+    Dataset: Kaggle (nadyinky)
 </div>
 """, unsafe_allow_html=True)
